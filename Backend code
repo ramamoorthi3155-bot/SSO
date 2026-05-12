@@ -1,0 +1,207 @@
+@api_view(['POST'])
+@authentication_classes([JWTTokenUserAuthentication])
+@permission_classes([IsAuthenticated])
+@log_function_call
+def redirect_to_tnskill(request):
+
+    user_detail = UserDetail.objects.select_related(
+        "student"
+    ).get(
+        user_id=request.user.id
+    )
+
+    if not user_detail.student_id:
+        return Response(
+            {
+                "message": "Student mapping not found"
+            },
+            status=status.HTTP_404_NOT_FOUND
+        )
+
+    student = user_detail.student
+
+    token = generate_sso_token(student)
+
+    redirect_url = (
+        f"https://tnskills.com/sso/login/?token={token}"
+    )
+
+    return Response(
+        {
+            "redirect_url": redirect_url
+        },
+        status=status.HTTP_200_OK
+    )
+
+
+def generate_sso_token(student):
+
+    secret_key = os.getenv(
+        "SKILL_REGISTRY_SECRET_KEY"
+    )
+
+    if not secret_key:
+        raise Exception(
+            "SKILL_REGISTRY_SECRET_KEY not configured"
+        )
+
+    current_time = int(time.time())
+
+    payload = {
+        "student_id": student.id,
+        "email": student.email,
+        "mobile": student.phone_number,
+        "source": "nm_portal",
+        "token_type": "sso",
+        "iat": current_time,
+        "exp": current_time + 60
+    }
+
+    token = jwt.encode(
+        payload,
+        secret_key,
+        algorithm="HS256"
+    )
+
+    if isinstance(token, bytes):
+        token = token.decode("utf-8")
+
+    return token
+
+
+
+@api_view(["GET"])
+@log_function_call
+def sso_login_for_tnskills(request):
+
+    from urllib.parse import parse_qs
+    query_string = request.META.get("QUERY_STRING","")
+    token = parse_qs(query_string).get("token",[None])[0]
+
+    if not token:
+        return Response(
+            {"message": "Token missing"},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    try:
+        secret_key = os.getenv("SKILL_REGISTRY_SECRET_KEY")
+
+        decoded = jwt.decode(
+            token,
+            secret_key,
+            algorithms=["HS256"]
+        )
+
+        if decoded.get("token_type") != "sso":
+            return Response(
+                {"message": "Invalid token type"},
+                status=status.HTTP_401_UNAUTHORIZED
+            )
+
+        if decoded.get("source") != "tn_skills":
+            return Response(
+                {"message": "Invalid source"},
+                status=status.HTTP_401_UNAUTHORIZED
+            )
+
+        email = decoded.get("email")
+        mobile = decoded.get("mobile")
+
+        if not email and not mobile:
+            return Response(
+                {"message": "Email or mobile is required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Find student
+        student = None
+
+        if email and mobile:
+            student = Student.objects.filter(
+                email=email,
+                phone_number=mobile
+            ).first()
+
+        if not student and email:
+            student = Student.objects.filter(
+                email=email
+            ).first()
+
+        if not student and mobile:
+            student = Student.objects.filter(
+                phone_number=mobile
+            ).first()
+
+        if not student:
+            return Response(
+                {"message": "Student not found"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        # Get mapped user
+        user_detail = UserDetail.objects.select_related(
+            "user"
+        ).filter(
+            student_id=student.id,
+            user__account_role=AccountRole.STUDENT
+        ).first()
+
+        if not user_detail:
+            return Response(
+                {"message": "User mapping not found"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        user = user_detail.user
+        # Generate NM tokens (same as normal login)
+        refresh_token = MyTokenObtainPairSerializer.get_token(user=user)
+        access_token = str(refresh_token.access_token)
+
+        # Remove old session if exists
+        old_token = cache.get(f"user:{user.id}:token")
+        if old_token:
+            cache.delete(f"user:{user.id}:token")
+
+        # Store latest session
+        cache.set(
+            f"user:{user.id}:token",
+            access_token,
+            timeout=3600
+        )
+
+        # Login signal
+        user_logged_in.send(
+            sender=user.__class__,
+            request=request,
+            user=user,
+            token=access_token
+        )
+
+        return Response(
+            {
+                "access": access_token,
+                "refresh": str(refresh_token),
+                "user_exists": True
+            },
+            status=status.HTTP_200_OK
+        )
+
+    except jwt.ExpiredSignatureError:
+        return Response(
+            {"message": "Token expired"},
+            status=status.HTTP_401_UNAUTHORIZED
+        )
+
+    except jwt.InvalidTokenError:
+        return Response(
+            {"message": "Invalid token"},
+            status=status.HTTP_401_UNAUTHORIZED
+        )
+
+    except Exception as e:
+        logger.exception(f"SSO login failed: {str(e)}")
+
+        return Response(
+            {"message": f"Something went wrong - {str(e)}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
