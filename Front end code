@@ -1,0 +1,146 @@
+btn for another portal:
+
+   async redirectToTNSkills() {
+      try {
+        const response = await this.$store.dispatch('generateTnskillSsoToken')
+
+        if (response.redirect_url) {
+          window.location.href = response.redirect_url;
+        }
+
+      } catch (error) {
+        console.error('TN Skills redirection failed:', error);
+      }
+    },
+
+
+authstore.ts file:
+
+generateTnskillSsoToken({ commit }) {
+    // eslint-disable-next-line no-async-promise-executor
+    return new Promise(async (resolve, reject) => {
+      commit("SET_LOADING", true);
+      try {
+        const response = await axios.post("/api/v1/student/redirect_to_tnskill/");
+        commit("SET_LOADING", false);
+        resolve(response.data);
+      } catch (err: any) {
+        commit("SET_LOADING", false);
+        try {
+          reject(err.response.data.message);
+        } catch (e) {
+          console.error(e);
+          reject(err.message);
+        }
+      }
+    });
+  },
+
+  verifyTNSkillsSSO({ commit }, token) {
+    return new Promise(async (resolve, reject) => {
+      commit("SET_LOADING", true);
+
+      try {
+        const response = await axios.get(
+          `/api/v1/sso_login/?token=${token}`
+        );
+
+        commit("SET_LOADING", false);
+
+        resolve(response.data);
+
+      } catch (err: any) {
+
+        commit("SET_LOADING", false);
+
+        try {
+          reject(err.response.data.message);
+        } catch (e) {
+          reject(err.message);
+        }
+      }
+    });
+  },
+
+
+
+
+
+
+
+index.ts file :
+
+{
+        path: '/tnskills-sso',
+        name: 'TNSkillsSSO',
+        meta: { requiresAuth: false },
+        component: () =>
+          import(
+            '../views/student/v2/TNSkillsSSOPage.vue'
+          ),
+      },
+
+
+new SSO page:
+<template>
+  <div
+    class="flex justify-center items-center min-h-screen"
+  >
+    Loading...
+  </div>
+</template>
+
+<script>
+export default {
+  name: 'TNSkillsSSOPage',
+
+  async mounted() {
+    try {
+      const ssoToken = this.$route.query.token;
+
+      if (!ssoToken) {
+        this.$router.push('/login');
+        return;
+      }
+
+      const response = await this.$store.dispatch(
+        'verifyTNSkillsSSO',
+        ssoToken
+      );
+
+      if (response.user_exists) {
+        localStorage.setItem(
+          'token',
+          response.access
+        );
+
+        localStorage.setItem(
+          'refresh',
+          response.refresh
+        );
+
+        await this.$store.dispatch(
+          'fetchProfileDetails'
+        );
+
+        this.$router.push('/');
+      } else {
+        this.$router.push('/login');
+      }
+
+    } catch (error) {
+      console.error(error);
+      this.$router.push('/login');
+    }
+  },
+};
+</script>
+
+
+
+
+
+
+
+
+
