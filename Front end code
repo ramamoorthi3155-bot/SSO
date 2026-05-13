@@ -44,7 +44,7 @@ generateTnskillSsoToken({ commit }) {
         const response = await axios.get(
           `/api/v1/sso_login/?token=${token}`
         );
-
+        commit("SET_LOGGED_IN", true);
         commit("SET_LOADING", false);
 
         resolve(response.data);
